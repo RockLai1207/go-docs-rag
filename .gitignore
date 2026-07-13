@@ -1,0 +1,14 @@
+# Secrets
+.env
+
+# Generated artifacts (rebuild with ingest.py + embed_index.py)
+data/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# OS
+.DS_Store
