@@ -1,7 +1,7 @@
 # Go Docs RAG — 中文問答 × Go 官方文件
 
 用繁體中文提問，從 Go 官方英文文件中檢索依據、生成有來源標注的中文答案。一個完整的 RAG（Retrieval-Augmented Generation）管線實作：文件擷取、切塊、向量索引、語意檢索、grounded 生成與雙層拒答機制。
-
+**🌌 Live Demo:** [互動式 3D 向量空間視覺化](https://rocklai1207.github.io/go-docs-rag/viz/viz.html) — 在瀏覽器直接體驗檢索流程
 ```
 $ python ask.py "goroutine 和 channel 怎麼搭配使用?"
 
