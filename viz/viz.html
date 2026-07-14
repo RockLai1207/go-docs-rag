@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<title>Go Docs RAG — 向量空間視覺化</title>
+<style>
+  :root {
+    --bg: #0a0618; --panel: rgba(16, 10, 38, 0.88); --line: rgba(168, 150, 255, 0.22);
+    --ink: #ece8ff; --dim: #9a8fc9; --hot: #ffb35c; --mono: "SF Mono", "Consolas", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: var(--bg); color: var(--ink); font-family: "Noto Sans TC", sans-serif; overflow: hidden; }
+  canvas { display: block; }
+
+  #hud { position: fixed; top: 16px; left: 16px; width: 340px; z-index: 10; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; margin-bottom: 12px; backdrop-filter: blur(8px);
+  }
+  h1 { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+  .sub { font-size: 12px; color: var(--dim); line-height: 1.6; }
+
+  input[type=text], input[type=password] {
+    width: 100%; background: rgba(0,0,0,0.35); border: 1px solid var(--line);
+    border-radius: 8px; color: var(--ink); padding: 9px 12px; font-size: 13px; outline: none;
+  }
+  input:focus { border-color: var(--hot); }
+  .row { display: flex; gap: 8px; margin-top: 8px; }
+  button {
+    background: var(--hot); color: #1a0f00; border: 0; border-radius: 8px;
+    padding: 9px 14px; font-size: 13px; font-weight: 700; cursor: pointer; white-space: nowrap;
+  }
+  button:disabled { opacity: 0.45; cursor: default; }
+  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); font-weight: 400; }
+
+  #flow { display: flex; gap: 6px; margin-top: 10px; }
+  .step {
+    flex: 1; text-align: center; font-size: 11px; color: var(--dim);
+    border: 1px solid var(--line); border-radius: 6px; padding: 5px 2px; transition: all .3s;
+    font-family: var(--mono);
+  }
+  .step.on { color: var(--hot); border-color: var(--hot); background: rgba(255,179,92,0.1); }
+
+  #results { max-height: 42vh; overflow-y: auto; }
+  .hit { border-top: 1px solid var(--line); padding: 10px 0; cursor: pointer; }
+  .hit:hover { background: rgba(255,255,255,0.03); }
+  .hit .h-title { font-size: 12.5px; font-weight: 700; }
+  .hit .h-meta { font-size: 11px; color: var(--dim); font-family: var(--mono); margin-top: 2px; }
+  .hit .h-text { font-size: 11.5px; color: var(--dim); margin-top: 4px; line-height: 1.5; }
+
+  /* 答案面板:置中彈窗 */
+  #answerPanel {
+    position: fixed; z-index: 30;
+    top: 50%; left: 50%; transform: translate(-50%, -50%);
+    width: min(680px, 88vw);
+    max-height: 78vh; display: flex; flex-direction: column;
+    box-shadow: 0 30px 80px rgba(0,0,0,0.6);
+    margin-bottom: 0;
+  }
+  #answerPanel.hidden { display: none !important; }
+  #answer {
+    font-size: 14px; line-height: 1.9; white-space: pre-wrap;
+    overflow-y: auto; flex: 1;
+  }
+  #answer code { font-family: var(--mono); font-size: 12px; background: rgba(0,0,0,0.35); padding: 1px 4px; border-radius: 4px; }
+
+  #tooltip {
+    position: fixed; display: none; z-index: 20; max-width: 380px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    padding: 12px; font-size: 12px; line-height: 1.6; pointer-events: none;
+  }
+  #tooltip .t-doc { color: var(--hot); font-weight: 700; }
+  #tooltip .t-sec { color: var(--dim); font-family: var(--mono); font-size: 11px; }
+
+  #legend { position: fixed; right: 16px; bottom: 16px; z-index: 10; font-size: 11.5px; }
+  .lg { display: flex; align-items: center; gap: 7px; color: var(--dim); margin-top: 4px; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; }
+
+  #hint { position: fixed; right: 16px; top: 16px; z-index: 10; font-size: 11px; color: var(--dim); font-family: var(--mono); }
+  .hidden { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="hud">
+  <div class="panel">
+    <h1>Go Docs RAG — 向量空間</h1>
+    <p class="sub">每顆星是一個文件 chunk。位置由 768 維語意向量降維而來——<b>靠得近，代表語意相近</b>。</p>
+    <div style="margin-top:10px">
+      <input id="q" type="text" placeholder="用中文問 Go 的問題，例如：goroutine 是什麼？" />
+      <div class="row">
+        <button id="searchBtn">語意檢索</button>
+        <button id="genBtn" class="ghost" disabled>生成答案</button>
+        <button id="resetBtn" class="ghost">重置</button>
+      </div>
+    </div>
+    <div id="flow">
+      <div class="step" id="s1">① embed 問題</div>
+      <div class="step" id="s2">② 向量檢索</div>
+      <div class="step" id="s3">③ 生成答案</div>
+    </div>
+  </div>
+
+  <div class="panel" id="keyPanel">
+    <p class="sub">語意檢索與生成需要 Gemini API key（<a href="https://aistudio.google.com/apikey" target="_blank" style="color:var(--hot)">免費申請</a>）。Key 只存在你瀏覽器的記憶體中，不會被上傳或儲存。沒有 key 也可用關鍵字搜尋。</p>
+    <div class="row">
+      <input id="apiKey" type="password" placeholder="貼上你的 Gemini API key（選填）" />
+    </div>
+  </div>
+
+  <div class="panel hidden" id="resultsPanel">
+    <p class="sub" id="resultsTitle"></p>
+    <div id="results"></div>
+  </div>
+</div>
+
+<div class="panel hidden" id="answerPanel">
+  <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px">
+    <p class="sub">依據檢索段落生成的答案：</p>
+    <button class="ghost" onclick="document.getElementById('answerPanel').classList.add('hidden')" style="padding:4px 12px">✕ 關閉</button>
+  </div>
+  <div id="answer"></div>
+</div>
+
+<div id="tooltip"></div>
+<div id="legend" class="panel"></div>
+<div id="hint">拖曳旋轉 · 滾輪縮放 · 點星星看內容</div>
+
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+const EMBED_MODEL = "gemini-embedding-001";
+const GEN_MODEL = "gemini-2.5-flash";
+const TOP_K = 5;
+
+const DOC_COLORS = {
+  "Effective Go":        0xff6ea8,
+  "Go FAQ":              0x59d7ff,
+  "How to Write Go Code":0xffb35c,
+  "go.mod Reference":    0x8f7bff,
+  "Go Doc Comments":     0x63f2b1,
+};
+
+let nodes = [], meshes = [], scene, camera, renderer, controls, group;
+let currentHits = [];
+
+// ---------- 場景 ----------
+function initScene() {
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(58, innerWidth/innerHeight, 0.1, 5000);
+  camera.position.set(0, 40, 250);
+  renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setSize(innerWidth, innerHeight);
+  renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+  document.body.appendChild(renderer.domElement);
+  controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true; controls.dampingFactor = 0.06;
+
+  // 星空背景
+  const starGeo = new THREE.BufferGeometry();
+  const verts = [];
+  for (let i = 0; i < 4500; i++)
+    verts.push((Math.random()-0.5)*2600, (Math.random()-0.5)*2600, (Math.random()-0.5)*2600);
+  starGeo.setAttribute("position", new THREE.Float32BufferAttribute(verts, 3));
+  scene.add(new THREE.Points(starGeo, new THREE.PointsMaterial({ size: 1.1, color: 0x5a4d8a })));
+
+  // 中央光暈(軟漸層,獨立於星點貼圖)
+  const glowCv = document.createElement("canvas"); glowCv.width = glowCv.height = 128;
+  const gctx = glowCv.getContext("2d");
+  const gg = gctx.createRadialGradient(64,64,0,64,64,64);
+  gg.addColorStop(0, "#ffe9d2"); gg.addColorStop(0.6, "#ffe9d244"); gg.addColorStop(1, "transparent");
+  gctx.fillStyle = gg; gctx.fillRect(0,0,128,128);
+  const glow = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(glowCv), transparent: true, opacity: 0.4,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  glow.scale.set(150, 150, 1);
+  scene.add(glow);
+
+  // 經緯線球
+  const wire = new THREE.Mesh(
+    new THREE.SphereGeometry(118, 28, 20),
+    new THREE.MeshBasicMaterial({ color: 0x7a68c9, wireframe: true, transparent: true, opacity: 0.07 })
+  );
+  scene.add(wire);
+
+  group = new THREE.Group();
+  scene.add(group);
+
+  window.addEventListener("resize", () => {
+    camera.aspect = innerWidth/innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(innerWidth, innerHeight);
+  });
+}
+
+function makeSprite(color, size, opacity) {
+  const cv = document.createElement("canvas"); cv.width = cv.height = 64;
+  const ctx = cv.getContext("2d");
+  const c = "#" + color.toString(16).padStart(6,"0");
+  // 實心圓點:硬邊緣,只留極窄的抗鋸齒過渡,無光暈
+  const g = ctx.createRadialGradient(32,32,0,32,32,30);
+  g.addColorStop(0.0, "#ffffff");
+  g.addColorStop(0.25, c);
+  g.addColorStop(0.80, c);
+  g.addColorStop(0.95, "transparent");
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(32,32,30,0,Math.PI*2); ctx.fill();
+  const sp = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(cv), transparent: true, opacity,
+    depthWrite: false,
+  }));
+  sp.scale.set(size, size, 1);
+  return sp;
+}
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r, y);
+  ctx.arcTo(x+w, y, x+w, y+h, r); ctx.arcTo(x+w, y+h, x, y+h, r);
+  ctx.arcTo(x, y+h, x, y, r); ctx.arcTo(x, y, x+w, y, r);
+  ctx.closePath();
+}
+
+function makeLabel(text, hexColor) {
+  const pad = 28, fs = 40;
+  const cv = document.createElement("canvas");
+  const mctx = cv.getContext("2d");
+  mctx.font = `700 ${fs}px "Noto Sans TC", sans-serif`;
+  const w = Math.ceil(mctx.measureText(text).width) + pad*2;
+  const h = fs + pad*1.6;
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d");
+  ctx.fillStyle = "rgba(5, 3, 18, 0.72)";          // 底色
+  roundRect(ctx, 2, 2, w-4, h-4, 10); ctx.fill();
+  ctx.strokeStyle = hexColor; ctx.lineWidth = 2.5;  // 霓虹外框
+  ctx.shadowColor = hexColor; ctx.shadowBlur = 8;  // ← 霓虹發光強度
+  roundRect(ctx, 2, 2, w-4, h-4, 10); ctx.stroke();
+  ctx.shadowBlur = 8;
+  ctx.font = `700 ${fs}px "Noto Sans TC", sans-serif`;
+  ctx.fillStyle = hexColor;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  ctx.fillText(text, w/2, h/2 + 2);
+  const label = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: new THREE.CanvasTexture(cv), transparent: true, depthWrite: false,
+  }));
+  const lh = 7;                                    // ← 標籤大小(高度)
+  label.scale.set(lh * (w/h), lh, 1);
+  return label;
+}
+
+// ---------- 載入資料、生成節點 ----------
+async function loadData() {
+  const res = await fetch("viz_data.json");
+  const data = await res.json();
+  nodes = data.nodes;
+
+  // 1) 生成星點
+  nodes.forEach(n => {
+    const color = DOC_COLORS[n.doc] ?? 0xffffff;
+    const sp = makeSprite(color, 2.0, 0.95);
+    sp.position.set(n.pos[0], n.pos[1], n.pos[2]);
+    sp.userData = n;
+    meshes.push(sp);
+    group.add(sp);
+  });
+
+  // 2) 同文件的星點依 chunk 順序連成星座線
+  const byDoc = {};
+  meshes.forEach(m => {
+    (byDoc[m.userData.doc] ??= []).push(m);
+  });
+  Object.entries(byDoc).forEach(([doc, arr]) => {
+    const color = DOC_COLORS[doc] ?? 0xffffff;
+    for (let i = 0; i < arr.length - 1; i++) {
+      const geo = new THREE.BufferGeometry().setFromPoints([
+        arr[i].position, arr[i + 1].position,
+      ]);
+      const line = new THREE.Line(geo, new THREE.LineBasicMaterial({
+        color, transparent: true, opacity: 0.18,   // ← 線條明顯度在這調
+      }));
+      group.add(line);
+    }
+  });
+
+  // 3) 每份文件的群心 -> 放霓虹標籤(迴圈外,只算一次)
+  const centroids = {};
+  meshes.forEach(m => {
+    const d = m.userData.doc;
+    (centroids[d] ??= { x:0, y:0, z:0, c:0 });
+    centroids[d].x += m.position.x;
+    centroids[d].y += m.position.y;
+    centroids[d].z += m.position.z;
+    centroids[d].c += 1;
+  });
+  Object.entries(centroids).forEach(([doc, c]) => {
+    const color = DOC_COLORS[doc] ?? 0xffffff;
+    const hex = "#" + color.toString(16).padStart(6,"0");
+    const label = makeLabel(doc, hex);
+    label.position.set(c.x/c.c*1.18, c.y/c.c*1.18, c.z/c.c*1.18);
+    group.add(label);
+  });
+
+  // 4) 圖例
+  const lg = document.getElementById("legend");
+  lg.innerHTML = Object.entries(DOC_COLORS).map(([doc, c]) =>
+    `<div class="lg"><span class="dot" style="background:#${c.toString(16).padStart(6,"0")}"></span>${doc}</div>`
+  ).join("");
+}
+
+// ---------- 互動：hover / click ----------
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+const tooltip = document.getElementById("tooltip");
+
+addEventListener("mousemove", e => {
+  mouse.x = (e.clientX/innerWidth)*2 - 1;
+  mouse.y = -(e.clientY/innerHeight)*2 + 1;
+  raycaster.setFromCamera(mouse, camera);
+  const hit = raycaster.intersectObjects(meshes)[0];
+  if (hit) {
+    const n = hit.object.userData;
+    tooltip.style.display = "block";
+    tooltip.style.left = Math.min(e.clientX + 14, innerWidth - 400) + "px";
+    tooltip.style.top = Math.min(e.clientY + 14, innerHeight - 180) + "px";
+    tooltip.innerHTML = `<div class="t-doc">${n.doc}</div><div class="t-sec">${n.section}</div><div style="margin-top:6px">${escapeHtml(n.preview)}…</div>`;
+  } else tooltip.style.display = "none";
+});
+
+addEventListener("click", e => {
+  raycaster.setFromCamera(mouse, camera);
+  const hit = raycaster.intersectObjects(meshes)[0];
+  if (hit) window.open(hit.object.userData.url, "_blank");
+});
+
+function escapeHtml(s){ return s.replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+// ---------- RAG：embed → 檢索 → 生成 ----------
+function setStep(i) {
+  [1,2,3].forEach(k => document.getElementById("s"+k).classList.toggle("on", k <= i));
+}
+
+function cosineDist(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) { dot += a[i]*b[i]; na += a[i]*a[i]; nb += b[i]*b[i]; }
+  return 1 - dot / (Math.sqrt(na)*Math.sqrt(nb));
+}
+
+async function embedQuery(key, text) {
+  const res = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/${EMBED_MODEL}:embedContent?key=${key}`,
+    { method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        content: { parts: [{ text }] },
+        taskType: "RETRIEVAL_QUERY",
+        outputDimensionality: 768,
+      }) });
+  if (!res.ok) throw new Error(`embedding API ${res.status}`);
+  return (await res.json()).embedding.values;
+}
+
+function highlight(hits) {
+  const hitIds = new Set(hits.map(h => h.node.id));
+  meshes.forEach(m => {
+    const isHit = hitIds.has(m.userData.id);
+    m.material.opacity = isHit ? 1.0 : 0.07;
+    const base = isHit ? 3 : 2.0;
+    m.scale.set(base, base, 1);
+  });
+}
+
+function keywordSearch(q) {
+  const terms = q.toLowerCase().split(/\s+/).filter(Boolean);
+  return nodes
+    .map(n => {
+      const hay = (n.preview + " " + n.section).toLowerCase();
+      const score = terms.reduce((s, t) => s + (hay.includes(t) ? 1 : 0), 0);
+      return { node: n, score };
+    })
+    .filter(h => h.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, TOP_K)
+    .map(h => ({ node: h.node, dist: null }));
+}
+
+function renderResults(hits, mode) {
+  const panel = document.getElementById("resultsPanel");
+  panel.classList.remove("hidden");
+  document.getElementById("resultsTitle").textContent =
+    mode === "semantic" ? `語意檢索 Top ${hits.length}（cosine 距離越小越相關）` : `關鍵字比對 ${hits.length} 筆（無 key 模式）`;
+  document.getElementById("results").innerHTML = hits.map((h, i) => `
+    <div class="hit" onclick="window.open('${h.node.url}','_blank')">
+      <div class="h-title">#${i+1} ${h.node.section}</div>
+      <div class="h-meta">${h.node.doc}${h.dist !== null ? ` · distance=${h.dist.toFixed(3)}` : ""}</div>
+      <div class="h-text">${escapeHtml(h.node.preview.slice(0, 140))}…</div>
+    </div>`).join("");
+}
+
+async function doSearch() {
+  const q = document.getElementById("q").value.trim();
+  if (!q) return;
+  const key = document.getElementById("apiKey").value.trim();
+  const btn = document.getElementById("searchBtn");
+  btn.disabled = true;
+  document.getElementById("answerPanel").classList.add("hidden");
+
+  try {
+    if (key) {
+      setStep(1);
+      const qVec = await embedQuery(key, q);
+      setStep(2);
+      currentHits = nodes
+        .map(n => ({ node: n, dist: cosineDist(qVec, n.emb) }))
+        .sort((a, b) => a.dist - b.dist)
+        .slice(0, TOP_K);
+      renderResults(currentHits, "semantic");
+      document.getElementById("genBtn").disabled = false;
+    } else {
+      setStep(2);
+      currentHits = keywordSearch(q);
+      renderResults(currentHits, "keyword");
+      document.getElementById("genBtn").disabled = true;
+    }
+    highlight(currentHits);
+  } catch (err) {
+    alert("檢索失敗：" + err.message + "\n（請確認 API key 正確，或稍後再試）");
+    setStep(0);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function doGenerate() {
+  const key = document.getElementById("apiKey").value.trim();
+  const q = document.getElementById("q").value.trim();
+  if (!key || !currentHits.length) return;
+  const btn = document.getElementById("genBtn");
+  btn.disabled = true;
+  setStep(3);
+
+  const context = currentHits.map((h, i) =>
+    `[段落 ${i+1}] 來源：${h.node.doc} › ${h.node.section}\n${h.node.preview}`).join("\n\n---\n\n");
+
+  const sys = "你是 Go 語言官方文件的問答助手。只根據參考段落回答，用繁體中文，" +
+    "段落不足以回答就直接說「官方文件中沒有找到相關內容」，結尾標注引用的段落編號。";
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEN_MODEL}:generateContent?key=${key}`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: sys }] },
+          contents: [{ parts: [{ text: `參考段落：\n\n${context}\n\n---\n\n問題：${q}` }] }],
+          generationConfig: { temperature: 0.2 },
+        }) });
+    if (!res.ok) throw new Error(`generate API ${res.status}`);
+    const data = await res.json();
+    const text = data.candidates?.[0]?.content?.parts?.map(p => p.text).join("") ?? "（沒有取得回應）";
+    document.getElementById("answerPanel").classList.remove("hidden");
+    document.getElementById("answer").textContent = text;
+  } catch (err) {
+    alert("生成失敗：" + err.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function reset() {
+  meshes.forEach(m => { m.material.opacity = 0.95; m.scale.set(2.0, 2.0, 1); });
+  currentHits = [];
+  setStep(0);
+  document.getElementById("resultsPanel").classList.add("hidden");
+  document.getElementById("answerPanel").classList.add("hidden");
+  document.getElementById("genBtn").disabled = true;
+}
+
+document.getElementById("searchBtn").addEventListener("click", doSearch);
+document.getElementById("genBtn").addEventListener("click", doGenerate);
+document.getElementById("resetBtn").addEventListener("click", reset);
+document.getElementById("q").addEventListener("keydown", e => { if (e.key === "Enter") doSearch(); });
+
+// ---------- 主迴圈 ----------
+initScene();
+loadData();
+(function animate(){
+  requestAnimationFrame(animate);
+  group.rotation.y += 0.0011;
+  controls.update();
+  renderer.render(scene, camera);
+})();
+</script>
+</body>
+</html>
